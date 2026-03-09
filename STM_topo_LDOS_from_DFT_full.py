@@ -673,30 +673,26 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 self.line_decomp_axes.append(ax_super)
 
         elif self.mode == 'Map':
+            import matplotlib.ticker as ticker
             num_p = max(1, len(partitions))
-            h_topo = max(1.0, 2.5 - 0.5 * (num_p - 1))
-            self.gs.set_height_ratios([h_topo, float(num_p)])
-
-            if getattr(self, 'cax_list', None):
-                for cax in self.cax_list:
-                    if cax in self.fig.axes: cax.remove()
-            self.cax_list = []
-
+            
+            # Dynamic GridSpec Scaling
+            h_top = max(1.0, 3.0 - 0.5 * num_p)
+            h_bot = max(1.0, 1.0 * num_p)
+            self.gs.set_height_ratios([h_top, h_bot])
+            
+            if not hasattr(self, 'map_caxes'): self.map_caxes = []
+            
             if len(self.map_axes) != nepts * num_p or full_refresh:
-                for ax in self.map_axes:
+                for ax in self.map_axes + self.map_caxes:
                     if ax in self.fig.axes: ax.remove()
                 self.map_axes.clear()
-                
-                w_ratios = [1.0] * nepts + [0.08]
-                sub_gs = gridspec.GridSpecFromSubplotSpec(num_p, nepts + 1, subplot_spec=self.gs[1, :], width_ratios=w_ratios, wspace=0.1, hspace=0.2)
-                
+                self.map_caxes.clear()
+                w_ratios = [1]*nepts + [0.1]
+                sub_gs = gridspec.GridSpecFromSubplotSpec(num_p, nepts + 1, subplot_spec=self.gs[1, :], wspace=0.1, hspace=0.2, width_ratios=w_ratios)
                 for r in range(num_p):
-                    for c in range(nepts): 
-                        self.map_axes.append(self.fig.add_subplot(sub_gs[r, c]))
-                    if self.show_dcmp_norm:
-                        self.cax_list.append(self.fig.add_subplot(sub_gs[r, nepts]))
-                if not self.show_dcmp_norm:
-                    self.cax_list.append(self.fig.add_subplot(sub_gs[:, nepts]))
+                    for c in range(nepts): self.map_axes.append(self.fig.add_subplot(sub_gs[r, c]))
+                    self.map_caxes.append(self.fig.add_subplot(sub_gs[r, nepts]))
 
             if not hasattr(self, 'map_e_targets') or len(self.map_e_targets) != nepts or full_refresh:
                 self.map_e_targets = np.linspace(self.s_emin.val, self.s_emax.val, nepts)
@@ -715,11 +711,11 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 if v_max > global_vmax: global_vmax = v_max
             if global_vmax == 0: global_vmax = 1e-15
             
-            import matplotlib.ticker as ticker
             for p_idx, (p_label, t_data) in enumerate(processed_partitions):
                 v_max = np.max(np.abs(t_data)) if self.show_dcmp_norm else global_vmax
                 if v_max == 0: v_max = 1e-15
                 
+                mesh = None
                 for i, target_e in enumerate(self.map_e_targets):
                     ax = self.map_axes[p_idx * nepts + i]
                     ax.clear()
@@ -743,21 +739,16 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                     if ylabel_str: ax.set_ylabel(ylabel_str, fontsize=10)
                     ax.set_aspect('equal'); ax.set_xticks([]); ax.set_yticks([])
 
-                if self.show_dcmp_norm:
-                    cax = self.cax_list[p_idx]
-                    cax.clear()
-                    cb = self.fig.colorbar(mesh, cax=cax)
-                    exp = int(np.floor(np.log10(v_max)))
-                    cb.ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos, e=exp: f"{x / (10**e):.1f}"))
-                    cax.set_title(f"1e{exp}", fontsize=10)
-                    
-            if not self.show_dcmp_norm and len(processed_partitions) > 0:
-                cax = self.cax_list[0]
-                cax.clear()
-                cb = self.fig.colorbar(mesh, cax=cax)
-                exp = int(np.floor(np.log10(global_vmax)))
-                cb.ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos, e=exp: f"{x / (10**e):.1f}"))
-                cax.set_title(f"1e{exp}", fontsize=10)
+                cax_l = self.map_caxes[p_idx]
+                cax_l.clear()
+                if self.show_dcmp_norm or p_idx == num_p - 1:
+                    if mesh is not None:
+                        cb = self.fig.colorbar(mesh, cax=cax_l)
+                        exp = int(np.floor(np.log10(v_max)))
+                        cb.ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos, e=exp: f"{x / (10**e):.1f}"))
+                        cax_l.set_title(f"1e{exp}", fontsize=10)
+                else:
+                    cax_l.axis('off')
 
             if self.plot_level >= 3:
                 ax_super = self.fig.add_subplot(self.gs[1, :])
@@ -885,6 +876,8 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
     def _on_ui_change(self, val):
         states = self.chk.get_status()
         self.show_atoms, self.use_decay_ldos, self.normalize, self.show_mag, self.show_unit_cell, self.show_decomp, self.show_dcmp_norm = states[:7]
+        if self.show_decomp and self.plot_level == 0: self.plot_level = 1
+        elif not self.show_decomp: self.plot_level = 0
         self.display_cells = int(self.s_cell.val)
         
         new_count = int(self.s_num_marks.val)
