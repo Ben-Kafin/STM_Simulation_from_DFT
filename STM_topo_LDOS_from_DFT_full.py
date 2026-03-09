@@ -22,10 +22,12 @@ from matplotlib.lines import Line2D
 import mplcursors
 from time import time
 
-# Assuming these exist in your environment
+# --- SURGICAL IMPORT INTEGRATION ---
+# Assuming these exist in your environment as per original source
 from DOSCAR_spin_orbitals import SpinAwareDosParser
 from LOCPOT_spin import LocpotManager
 
+# --- CORE UTILITIES ---
 def gpu_simpson(y, x):
     """Vectorized Simpson's Rule for GPU parity."""
     n = y.shape[1]
@@ -364,12 +366,10 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 if self.mode == 'Map': self.ax_map.plot(cell_pts[:, 0], cell_pts[:, 1], color='cyan', lw=2.0, ls='-', zorder=4, label='Unit Cell')
             
             t_ax.set_aspect('equal')
+            t_ax.set_title(f"Global Topo | Bias: {self.global_topo_bias} V | Height: {self.topo_height} Å")
             if self.mode == 'Map':
-                t_ax.set_title(f"Global Topo\nBias: {self.global_topo_bias} V\nHeight: {self.topo_height} Å")
                 self.ax_map.set_aspect('equal')
-                self.ax_map.set_title(f"Map Topo\nBias: {self.s_emin.val if str(self.ldos_bias_sign).lower() in ['neg', '-', 'negative'] else self.s_emax.val} V\nHeight: {self.ldos_height} Å")
-            else:
-                t_ax.set_title(f"Global Topo | Bias: {self.global_topo_bias} V | Height: {self.topo_height} Å")
+                self.ax_map.set_title(f"Map Topo | Bias: {self.s_emin.val if str(self.ldos_bias_sign).lower() in ['neg', '-', 'negative'] else self.s_emax.val} V | Height: {self.ldos_height} Å")
             if self.mode == 'Line':
                 self.ax_map.add_line(self.line_art); self.ax_map.add_collection(self.ends)
             self.ax_map.add_collection(self.marks)
@@ -424,7 +424,7 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                     cell_pts = np.array([v0, v1, v2, v3, v0])
                     self.ax_map.plot(cell_pts[:, 0], cell_pts[:, 1], color='cyan', lw=2.0, ls='-', zorder=4, label='Unit Cell')
                 self.ax_map.set_aspect('equal')
-                self.ax_map.set_title(f"Map Topo\nBias: {bias_e} V\nHeight: {self.ldos_height} Å")
+                self.ax_map.set_title(f"Map Topo | Bias: {bias_e} V | Height: {self.ldos_height} Å")
                 self.ax_map.add_collection(self.marks)
 
         if needs_ldos:
@@ -675,9 +675,7 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
         elif self.mode == 'Map':
             num_p = max(1, len(partitions))
             h_topo = max(1.0, 2.5 - 0.5 * (num_p - 1))
-            w_topo = h_topo / 2.5
             self.gs.set_height_ratios([h_topo, float(num_p)])
-            self.gs.set_width_ratios([w_topo, w_topo, 3.2 - 2.0 * w_topo])
 
             if getattr(self, 'cax_list', None):
                 for cax in self.cax_list:
@@ -731,9 +729,9 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                         for ny in range(2):
                             off = nx * self.lv[0, :2] + ny * self.lv[1, :2]
                             if self.show_mag and f_dn is not None:
-                                mesh = ax.tricontourf(self.grid_xy[:,0] + off[0], self.grid_xy[:,1] + off[1], slice_data, levels=np.linspace(-v_max, v_max, 40), cmap='bwr')
+                                mesh = ax.tricontourf(self.grid_xy[:,0] + off[0], self.grid_xy[:,1] + off[1], slice_data, levels=40, cmap='bwr', vmin=-v_max, vmax=v_max)
                             else:
-                                mesh = ax.tricontourf(self.grid_xy[:,0] + off[0], self.grid_xy[:,1] + off[1], slice_data, levels=np.linspace(0, v_max, 40), cmap='jet')
+                                mesh = ax.tricontourf(self.grid_xy[:,0] + off[0], self.grid_xy[:,1] + off[1], slice_data, levels=40, cmap='jet', vmin=0, vmax=v_max)
                     
                     ax.scatter(m_coords_np[:, 0], m_coords_np[:, 1], color=self.m_colors[:len(m_coords_np)], s=30, edgecolors='white', zorder=5)
                     title_str = f"E = {target_e:.3f} eV" if p_idx == 0 else ""
@@ -802,9 +800,9 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 for ny in range(2):
                     off = nx * self.lv[0, :2] + ny * self.lv[1, :2]
                     if self.show_mag and f_dn is not None:
-                        ax.tricontourf(self.grid_xy[:,0] + off[0], self.grid_xy[:,1] + off[1], slice_data, levels=np.linspace(-v_max, v_max, 40), cmap='bwr')
+                        ax.tricontourf(self.grid_xy[:,0] + off[0], self.grid_xy[:,1] + off[1], slice_data, levels=40, cmap='bwr', vmin=-v_max, vmax=v_max)
                     else:
-                        ax.tricontourf(self.grid_xy[:,0] + off[0], self.grid_xy[:,1] + off[1], slice_data, levels=np.linspace(0, v_max, 40), cmap='jet')
+                        ax.tricontourf(self.grid_xy[:,0] + off[0], self.grid_xy[:,1] + off[1], slice_data, levels=40, cmap='jet', vmin=0, vmax=v_max)
             
             ax.scatter(m_coords_np[:, 0], m_coords_np[:, 1], color=self.m_colors[:len(m_coords_np)], s=30, edgecolors='white', zorder=5)
             title_str = f"E = {target_e:.3f} eV" if p_idx == 0 else ""
@@ -922,5 +920,6 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
 
 if __name__ == "__main__":
     v_dir = r'C:/dir'
+    # Initialized without hardcoded path or marker indices
     sim = Interactive_STM_Simulator(v_dir, [-2.525, -1.3], 1.3, LinearSegmentedColormap.from_list("t", ["black", "firebrick", "yellow"]))
     sim.run_interactive(grid_res=64, topo_bias=0.2, topo_height=2.5, ldos_bias_sign='neg', use_decay_topo=True)
