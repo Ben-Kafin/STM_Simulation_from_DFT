@@ -267,7 +267,19 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                         t_idx = [i for i, x in enumerate(atom_types_exp) if x == t]
                         t_data = np.sum(f_ldos_raw[:, :, t_idx, :], axis=(2, 3)) if t_idx else np.zeros_like(f_ldos_raw[:, :, 0, 0])
                         partitions.append((t, t_data))
-                elif self.plot_level >= 3:
+                elif self.plot_level == 3:
+                    atom_types_exp = np.repeat(self.atomtypes, self.atomnums)
+                    if getattr(self, 'active_element', None) is not None:
+                        e_idx = [i for i, x in enumerate(atom_types_exp) if x == self.active_element]
+                        for col_idx, orb in enumerate(self.orbitals):
+                            if e_idx:
+                                D = cp.sum(self.dos_up_gpu[e_idx, :, col_idx], axis=0)
+                                dD = cp.gradient(D)
+                                d2D = cp.gradient(dD)
+                                if not (float(cp.max(cp.abs(D))) < 1e-5 and float(cp.max(cp.abs(dD))) < 1e-5 and float(cp.max(cp.abs(d2D))) < 1e-5):
+                                    orb_data = np.sum(f_ldos_raw[:, :, e_idx, col_idx], axis=2)
+                                    partitions.append((f"{self.active_element} {orb}", orb_data))
+                elif self.plot_level == 4:
                     atom_types_exp = np.repeat(self.atomtypes, self.atomnums)
                     if getattr(self, 'active_element', None) is not None:
                         e_idx = [i for i, x in enumerate(atom_types_exp) if x == self.active_element]
@@ -387,10 +399,14 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
         nepts = int(self.s_nepts.val) if hasattr(self, 's_nepts') else None
         needs_topo = ((self.mode == 'Line' and (self.cached_p1 is None or not np.array_equal(self.p1, self.cached_p1) or not np.array_equal(self.p2, self.cached_p2) or self.cached_bias_energy_line != bias_e or self.cached_d_topo_line != self.use_decay_topo)) or 
                       (self.mode == 'Map' and (self.cached_bias_energy_map != bias_e or self.cached_d_topo_map != self.use_decay_topo)))
-        needs_ldos = (needs_topo or self.cached_emin != self.s_emin.val or self.cached_emax != self.s_emax.val or self.cached_d_ldos != self.use_decay_ldos or (self.mode == 'Map' and self.cached_nepts != nepts))
+        # Force refresh if mode changes to prevent Map-mode dimensionality leakage into Line mode
+        needs_ldos = (needs_topo or self.cached_emin != self.s_emin.val or self.cached_emax != self.s_emax.val or 
+                      self.cached_d_ldos != self.use_decay_ldos or getattr(self, 'cached_mode', None) != self.mode or
+                      (self.mode == 'Map' and self.cached_nepts != nepts))
         needs_spec = (needs_ldos or (self.mode in ['Single Point', 'Map'] and (self.cached_marker_coords is None or not np.array_equal(self.marker_coords, self.cached_marker_coords))))
 
         if needs_topo:
+            # Line mode must match 'slow' version exactly for setpoint/convergence
             if self.mode == 'Line':
                 l_emin, l_emax = sorted([0.0, bias_e]); p_xy_gpu = cp.array(p_xy, dtype=cp.float32)
                 ld_up, ld_dn, l_engs = self._calculate_ldos_at_points_gpu(cp.hstack([p_xy_gpu, cp.full((self.npts,1), self.z_highest_atom + self.ldos_height, dtype=cp.float32)]), l_emin, l_emax, use_energy_decay=self.use_decay_topo, preserve_orbitals=False)
@@ -408,36 +424,27 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 z_map_gpu = self._converge_tip_height(z_fixed, self.grid_xy_gpu, t_emin, t_emax, target_setp, use_decay=self.use_decay_topo)
                 self.current_z_map = cp.asnumpy(z_map_gpu)
                 self.cached_bias_energy_map, self.cached_d_topo_map = bias_e, self.use_decay_topo
-                
+                # Redraw map topography precisely as in slow version
                 self.ax_map.clear(); n = int(self.s_cell.val)
                 for i in range(-n, n + 1):
                     for j in range(-n, n + 1):
                         off = i * self.lv[0, :2] + j * self.lv[1, :2]
                         self.ax_map.tricontourf(self.grid_xy[:, 0] + off[0], self.grid_xy[:, 1] + off[1], self.current_z_map, levels=60, cmap=self.cmap_topo, zorder=1)
-                        if self.show_atoms:
-                            tr = np.repeat(self.atomtypes, self.atomnums)
-                            for t_idx, t_name in enumerate(self.atomtypes):
-                                m = (tr == t_name)
-                                self.ax_map.scatter(self.coord[m, 0] + off[0], self.coord[m, 1] + off[1], s=10, color=plt.cm.tab10(t_idx/10), alpha=0.3, zorder=2)
-                if self.show_unit_cell:
-                    v0, v1, v2, v3 = np.array([0,0]), self.lv[0, :2], self.lv[0, :2] + self.lv[1, :2], self.lv[1, :2]
-                    cell_pts = np.array([v0, v1, v2, v3, v0])
-                    self.ax_map.plot(cell_pts[:, 0], cell_pts[:, 1], color='cyan', lw=2.0, ls='-', zorder=4, label='Unit Cell')
                 self.ax_map.set_aspect('equal')
-                self.ax_map.set_title(f"Map Topo | Bias: {bias_e} V | Height: {self.ldos_height} Å")
                 self.ax_map.add_collection(self.marks)
 
         if needs_ldos:
             if self.mode == 'Line':
+                # FIX: Force preserve_orbitals=True and full energy range for Line Decomp parity
                 ld_up, ld_dn, eg = self._calculate_ldos_at_points_gpu(np.hstack([p_xy, self.current_z_line[:, None]]), self.s_emin.val, self.s_emax.val, use_energy_decay=self.use_decay_ldos, preserve_orbitals=True)
             elif self.mode == 'Map':
+                # Optimized discrete energy slicing for Map mode only
                 self.map_e_targets = np.linspace(self.s_emin.val, self.s_emax.val, nepts)
                 eg = cp.array(self.energies[np.searchsorted(self.energies, self.s_emin.val):np.searchsorted(self.energies, self.s_emax.val, side='right')])
                 ld_up_list, ld_dn_list = [], []
                 grid_z = cp.hstack([self.grid_xy_gpu, cp.array(self.current_z_map)[:, None]])
                 for t_e in self.map_e_targets:
                     e_idx = np.searchsorted(self.energies, t_e)
-                    if e_idx >= len(self.energies): e_idx = len(self.energies) - 1
                     t_up, t_dn, _ = self._calculate_ldos_at_points_gpu(grid_z, self.energies[e_idx], self.energies[min(e_idx+1, len(self.energies)-1)] + 1e-6, use_energy_decay=self.use_decay_ldos, preserve_orbitals=True, global_bias=abs(self.s_emax.val - self.s_emin.val))
                     ld_up_list.append(t_up[:, 0:1])
                     if t_dn is not None: ld_dn_list.append(t_dn[:, 0:1])
@@ -451,7 +458,8 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 self.cached_ld_up, self.cached_ld_dn = cp.asnumpy(ld_up), (cp.asnumpy(ld_dn) if ld_dn is not None else None)
             self.cached_eg = cp.asnumpy(eg)
             self.cached_emin, self.cached_emax, self.cached_d_ldos, self.cached_nepts = self.s_emin.val, self.s_emax.val, self.use_decay_ldos, nepts
-
+            self.cached_mode = self.mode
+            
         if needs_spec and self.mode in ['Single Point', 'Map']:
             m_coords = np.array(self.marker_coords)
             z_marks = []
@@ -673,26 +681,30 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 self.line_decomp_axes.append(ax_super)
 
         elif self.mode == 'Map':
-            import matplotlib.ticker as ticker
             num_p = max(1, len(partitions))
-            
-            # Dynamic GridSpec Scaling
-            h_top = max(1.0, 3.0 - 0.5 * num_p)
-            h_bot = max(1.0, 1.0 * num_p)
-            self.gs.set_height_ratios([h_top, h_bot])
-            
-            if not hasattr(self, 'map_caxes'): self.map_caxes = []
-            
+            h_topo = max(1.0, 2.5 - 0.5 * (num_p - 1))
+            self.gs.set_height_ratios([h_topo, float(num_p)])
+
+            if getattr(self, 'cax_list', None):
+                for cax in self.cax_list:
+                    if cax in self.fig.axes: cax.remove()
+            self.cax_list = []
+
             if len(self.map_axes) != nepts * num_p or full_refresh:
-                for ax in self.map_axes + self.map_caxes:
+                for ax in self.map_axes:
                     if ax in self.fig.axes: ax.remove()
                 self.map_axes.clear()
-                self.map_caxes.clear()
-                w_ratios = [1]*nepts + [0.1]
-                sub_gs = gridspec.GridSpecFromSubplotSpec(num_p, nepts + 1, subplot_spec=self.gs[1, :], wspace=0.1, hspace=0.2, width_ratios=w_ratios)
+                
+                w_ratios = [1.0] * nepts + [0.08]
+                sub_gs = gridspec.GridSpecFromSubplotSpec(num_p, nepts + 1, subplot_spec=self.gs[1, :], width_ratios=w_ratios, wspace=0.1, hspace=0.2)
+                
                 for r in range(num_p):
-                    for c in range(nepts): self.map_axes.append(self.fig.add_subplot(sub_gs[r, c]))
-                    self.map_caxes.append(self.fig.add_subplot(sub_gs[r, nepts]))
+                    for c in range(nepts): 
+                        self.map_axes.append(self.fig.add_subplot(sub_gs[r, c]))
+                    if self.show_dcmp_norm:
+                        self.cax_list.append(self.fig.add_subplot(sub_gs[r, nepts]))
+                if not self.show_dcmp_norm:
+                    self.cax_list.append(self.fig.add_subplot(sub_gs[:, nepts]))
 
             if not hasattr(self, 'map_e_targets') or len(self.map_e_targets) != nepts or full_refresh:
                 self.map_e_targets = np.linspace(self.s_emin.val, self.s_emax.val, nepts)
@@ -711,11 +723,11 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 if v_max > global_vmax: global_vmax = v_max
             if global_vmax == 0: global_vmax = 1e-15
             
+            import matplotlib.ticker as ticker
             for p_idx, (p_label, t_data) in enumerate(processed_partitions):
                 v_max = np.max(np.abs(t_data)) if self.show_dcmp_norm else global_vmax
                 if v_max == 0: v_max = 1e-15
                 
-                mesh = None
                 for i, target_e in enumerate(self.map_e_targets):
                     ax = self.map_axes[p_idx * nepts + i]
                     ax.clear()
@@ -739,16 +751,21 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                     if ylabel_str: ax.set_ylabel(ylabel_str, fontsize=10)
                     ax.set_aspect('equal'); ax.set_xticks([]); ax.set_yticks([])
 
-                cax_l = self.map_caxes[p_idx]
-                cax_l.clear()
-                if self.show_dcmp_norm or p_idx == num_p - 1:
-                    if mesh is not None:
-                        cb = self.fig.colorbar(mesh, cax=cax_l)
-                        exp = int(np.floor(np.log10(v_max)))
-                        cb.ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos, e=exp: f"{x / (10**e):.1f}"))
-                        cax_l.set_title(f"1e{exp}", fontsize=10)
-                else:
-                    cax_l.axis('off')
+                if self.show_dcmp_norm:
+                    cax = self.cax_list[p_idx]
+                    cax.clear()
+                    cb = self.fig.colorbar(mesh, cax=cax)
+                    exp = int(np.floor(np.log10(v_max)))
+                    cb.ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos, e=exp: f"{x / (10**e):.1f}"))
+                    cax.set_title(f"1e{exp}", fontsize=10)
+                    
+            if not self.show_dcmp_norm and len(processed_partitions) > 0:
+                cax = self.cax_list[0]
+                cax.clear()
+                cb = self.fig.colorbar(mesh, cax=cax)
+                exp = int(np.floor(np.log10(global_vmax)))
+                cb.ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos, e=exp: f"{x / (10**e):.1f}"))
+                cax.set_title(f"1e{exp}", fontsize=10)
 
             if self.plot_level >= 3:
                 ax_super = self.fig.add_subplot(self.gs[1, :])
@@ -876,8 +893,6 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
     def _on_ui_change(self, val):
         states = self.chk.get_status()
         self.show_atoms, self.use_decay_ldos, self.normalize, self.show_mag, self.show_unit_cell, self.show_decomp, self.show_dcmp_norm = states[:7]
-        if self.show_decomp and self.plot_level == 0: self.plot_level = 1
-        elif not self.show_decomp: self.plot_level = 0
         self.display_cells = int(self.s_cell.val)
         
         new_count = int(self.s_num_marks.val)
