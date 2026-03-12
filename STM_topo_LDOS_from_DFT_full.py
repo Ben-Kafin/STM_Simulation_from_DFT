@@ -238,11 +238,20 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
         grid_xy = (np.meshgrid(np.linspace(0,1,grid_res), np.linspace(0,1,grid_res))[0].ravel()[:, None] * self.lv[0, :2]) + (np.meshgrid(np.linspace(0,1,grid_res), np.linspace(0,1,grid_res))[1].ravel()[:, None] * self.lv[1, :2])
         grid_xy_gpu = cp.array(grid_xy, dtype=cp.float32); z_fixed = cp.full(grid_xy_gpu.shape[0], self.z_highest_atom + topo_height, dtype=cp.float32)
         t_emin, t_emax = sorted([0.0, topo_bias])
-        ld_up, ld_dn, init_engs = self._calculate_ldos_at_points_gpu(cp.hstack([grid_xy_gpu, z_fixed[:, None]]), t_emin, t_emax, use_energy_decay=self.use_decay_topo, preserve_orbitals=False)
-        target_setp = cp.max(gpu_simpson(ld_up + ld_dn if ld_dn is not None else ld_up, init_engs))
-        print(f"[*] Global Setpoint LDOS: {float(target_setp):.6e}")
-        z_map_gpu = self._converge_tip_height(z_fixed, grid_xy_gpu, t_emin, t_emax, target_setp, use_decay=self.use_decay_topo)
-        self.current_z_map, self.grid_xy = cp.asnumpy(z_map_gpu), grid_xy
+        cache_name = f"global_topo_{topo_bias}V_{topo_height}A_{grid_res}px.npy"
+        if exists(cache_name):
+            print(f"[*] Loading Cached Global Topography: {cache_name}")
+            self.current_z_map = np.load(cache_name)
+            z_map_gpu = cp.array(self.current_z_map, dtype=cp.float32)
+        else:
+            print(f"[*] Cache not found. Calculating Global Topography: {cache_name}")
+            ld_up, ld_dn, init_engs = self._calculate_ldos_at_points_gpu(cp.hstack([grid_xy_gpu, z_fixed[:, None]]), t_emin, t_emax, use_energy_decay=self.use_decay_topo, preserve_orbitals=False)
+            target_setp = cp.max(gpu_simpson(ld_up + ld_dn if ld_dn is not None else ld_up, init_engs))
+            print(f"[*] Global Setpoint LDOS: {float(target_setp):.6e}")
+            z_map_gpu = self._converge_tip_height(z_fixed, grid_xy_gpu, t_emin, t_emax, target_setp, use_decay=self.use_decay_topo)
+            self.current_z_map = cp.asnumpy(z_map_gpu)
+            np.save(cache_name, self.current_z_map)
+        self.grid_xy = grid_xy
         self.global_z_map = self.current_z_map.copy()
         self.grid_xy_gpu = grid_xy_gpu
         self.fig = plt.figure(figsize=(20, 14))
@@ -324,7 +333,7 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
             self.s_num_marks.on_changed(self._on_ui_change)
 
         elif self.mode == 'Map':
-            self.gs = gridspec.GridSpec(2, 3, height_ratios=[2.5, 1], width_ratios=[1, 1, 1.2], hspace=0.35, wspace=0.25)
+            self.gs = gridspec.GridSpec(2, 3, height_ratios=[2.5, 1], width_ratios=[1, 1, 4.0], hspace=0.35, wspace=0.05)
             self.ax_map_global, self.ax_map, self.ax_spec = self.fig.add_subplot(self.gs[0, 0]), self.fig.add_subplot(self.gs[0, 1]), self.fig.add_subplot(self.gs[0, 2])
             self.map_axes = []
             self.marks = self.ax_map.scatter([], [], s=150, edgecolors='black', zorder=15, picker=5)
@@ -378,10 +387,10 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 if self.mode == 'Map': self.ax_map.plot(cell_pts[:, 0], cell_pts[:, 1], color='cyan', lw=2.0, ls='-', zorder=4, label='Unit Cell')
             
             t_ax.set_aspect('equal')
-            t_ax.set_title(f"Global Topo | Bias: {self.global_topo_bias} V | Height: {self.topo_height} Å")
+            t_ax.set_title(f"Global Topo\nBias: {self.global_topo_bias} V\nHeight: {self.topo_height} Å")
             if self.mode == 'Map':
                 self.ax_map.set_aspect('equal')
-                self.ax_map.set_title(f"Map Topo | Bias: {self.s_emin.val if str(self.ldos_bias_sign).lower() in ['neg', '-', 'negative'] else self.s_emax.val} V | Height: {self.ldos_height} Å")
+                self.ax_map.set_title(f"Map Topo\nBias: {self.s_emin.val if str(self.ldos_bias_sign).lower() in ['neg', '-', 'negative'] else self.s_emax.val} V\nHeight: {self.ldos_height} Å")
             if self.mode == 'Line':
                 self.ax_map.add_line(self.line_art); self.ax_map.add_collection(self.ends)
             self.ax_map.add_collection(self.marks)
@@ -417,12 +426,20 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 self.cached_p1, self.cached_p2, self.cached_bias_energy_line, self.cached_d_topo_line = self.p1.copy(), self.p2.copy(), bias_e, self.use_decay_topo
             elif self.mode == 'Map':
                 t_emin, t_emax = sorted([0.0, bias_e])
-                z_fixed = cp.full(self.grid_xy_gpu.shape[0], self.z_highest_atom + self.ldos_height, dtype=cp.float32)
-                ld_up, ld_dn, init_engs = self._calculate_ldos_at_points_gpu(cp.hstack([self.grid_xy_gpu, z_fixed[:, None]]), t_emin, t_emax, use_energy_decay=self.use_decay_topo, preserve_orbitals=False)
-                target_setp = cp.max(gpu_simpson(ld_up + ld_dn if ld_dn is not None else ld_up, init_engs))
-                print(f"[*] Map Local Setpoint LDOS: {float(target_setp):.6e}")
-                z_map_gpu = self._converge_tip_height(z_fixed, self.grid_xy_gpu, t_emin, t_emax, target_setp, use_decay=self.use_decay_topo)
-                self.current_z_map = cp.asnumpy(z_map_gpu)
+                grid_res = int(np.sqrt(len(self.grid_xy)))
+                ldos_cache_name = f"ldos_topo_{bias_e}V_{self.ldos_height}A_{grid_res}px.npy"
+                if exists(ldos_cache_name):
+                    print(f"[*] Loading Cached LDOS Topography: {ldos_cache_name}")
+                    self.current_z_map = np.load(ldos_cache_name)
+                else:
+                    print(f"[*] Cache not found. Calculating LDOS Topography: {ldos_cache_name}")
+                    z_fixed = cp.full(self.grid_xy_gpu.shape[0], self.z_highest_atom + self.ldos_height, dtype=cp.float32)
+                    ld_up, ld_dn, init_engs = self._calculate_ldos_at_points_gpu(cp.hstack([self.grid_xy_gpu, z_fixed[:, None]]), t_emin, t_emax, use_energy_decay=self.use_decay_topo, preserve_orbitals=False)
+                    target_setp = cp.max(gpu_simpson(ld_up + ld_dn if ld_dn is not None else ld_up, init_engs))
+                    print(f"[*] Map Local Setpoint LDOS: {float(target_setp):.6e}")
+                    z_map_gpu = self._converge_tip_height(z_fixed, self.grid_xy_gpu, t_emin, t_emax, target_setp, use_decay=self.use_decay_topo)
+                    self.current_z_map = cp.asnumpy(z_map_gpu)
+                    np.save(ldos_cache_name, self.current_z_map)
                 self.cached_bias_energy_map, self.cached_d_topo_map = bias_e, self.use_decay_topo
                 # Redraw map topography precisely as in slow version
                 self.ax_map.clear(); n = int(self.s_cell.val)
@@ -522,19 +539,17 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 for i, r in enumerate(self.marker_ratios):
                     idx = int(r * (self.npts - 1))
                     c_ldos = f_ldos_raw[idx].copy()
-                    if self.normalize:
-                        c_total = np.sum(c_ldos, axis=(1, 2))
-                        c_ldos /= (np.trapezoid(c_total, x=self.cached_eg) + 1e-15)
                     t_y = np.sum(c_ldos, axis=(1, 2))
+                    if self.normalize:
+                        t_y /= (np.trapezoid(t_y, x=self.cached_eg) + 1e-15)
                     color = self.m_colors[i % len(self.m_colors)]
                     self.ax_spec.plot(self.cached_eg, t_y, color=color, lw=2.5, picker=True, pickradius=5, label=f'marker_{i}')
             else:
                 for i, pt in enumerate(self.marker_coords):
                     c_ldos = self.cached_spec_ldos[i].copy()
-                    if self.normalize:
-                        c_total = np.sum(c_ldos, axis=(1, 2))
-                        c_ldos /= (np.trapezoid(c_total, x=self.cached_eg) + 1e-15)
                     t_y = np.sum(c_ldos, axis=(1, 2))
+                    if self.normalize:
+                        t_y /= (np.trapezoid(t_y, x=self.cached_eg) + 1e-15)
                     color = self.m_colors[i % len(self.m_colors)]
                     self.ax_spec.plot(self.cached_eg, t_y, color=color, lw=2.5, picker=True, pickradius=5, label=f'marker_{i}')
             self.ax_spec.legend(loc='upper right', frameon=False)
@@ -618,9 +633,16 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
             
             processed_partitions = []
             global_vmax = 0.0
+            
+            if self.normalize and f_ldos_raw is not None:
+                total_ldos_line = np.sum(f_ldos_raw, axis=(2, 3))
+                norm_denom_line = np.trapezoid(total_ldos_line, x=self.cached_eg, axis=1)[:, None] + 1e-15
+            else:
+                norm_denom_line = 1.0
+
             for p_label, p_data in partitions:
                 t_data = p_data.copy()
-                if self.normalize: t_data /= (np.trapezoid(t_data, x=self.cached_eg, axis=1)[:, None] + 1e-15)
+                if self.normalize: t_data /= norm_denom_line
                 processed_partitions.append((p_label, t_data))
                 v_max = np.max(np.abs(t_data))
                 if v_max > global_vmax: global_vmax = v_max
@@ -682,15 +704,19 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
 
         elif self.mode == 'Map':
             num_p = max(1, len(partitions))
-            h_topo = max(1.0, 2.5 - 0.5 * (num_p - 1))
+            h_topo = max(1.0, 3.5 - float(num_p))
             self.gs.set_height_ratios([h_topo, float(num_p)])
-
-            if getattr(self, 'cax_list', None):
-                for cax in self.cax_list:
-                    if cax in self.fig.axes: cax.remove()
-            self.cax_list = []
+            
+            self.ax_map_global.set_subplotspec(self.gs[0, 0])
+            self.ax_map.set_subplotspec(self.gs[0, 1])
+            self.ax_spec.set_subplotspec(self.gs[0, 2])
 
             if len(self.map_axes) != nepts * num_p or full_refresh:
+                if getattr(self, 'cax_list', None):
+                    for cax in self.cax_list:
+                        if cax in self.fig.axes: cax.remove()
+                self.cax_list = []
+
                 for ax in self.map_axes:
                     if ax in self.fig.axes: ax.remove()
                 self.map_axes.clear()
@@ -712,11 +738,18 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
 
             processed_partitions = []
             global_vmax = 0.0
+            
+            if self.normalize and f_ldos_raw is not None:
+                total_ldos_map = np.sum(f_ldos_raw, axis=(2, 3))
+                s_idx = np.argsort(self.map_e_targets)
+                norm_denom_map = np.trapezoid(total_ldos_map[:, s_idx], x=self.map_e_targets[s_idx], axis=1)[:, None] + 1e-15
+            else:
+                norm_denom_map = 1.0
+
             for p_label, p_data in partitions:
                 t_data = p_data.copy()
                 if self.normalize:
-                    s_idx = np.argsort(self.map_e_targets)
-                    t_data /= (np.trapezoid(t_data[:, s_idx], x=self.map_e_targets[s_idx], axis=1)[:, None] + 1e-15)
+                    t_data /= norm_denom_map
                 t_data = np.nan_to_num(t_data, nan=0.0, posinf=0.0, neginf=0.0)
                 processed_partitions.append((p_label, t_data))
                 v_max = np.max(np.abs(t_data))
@@ -754,7 +787,11 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 if self.show_dcmp_norm:
                     cax = self.cax_list[p_idx]
                     cax.clear()
-                    cb = self.fig.colorbar(mesh, cax=cax)
+                    cmap_choice = 'bwr' if (self.show_mag and f_dn is not None) else 'jet'
+                    norm_choice = mc.Normalize(vmin=-v_max, vmax=v_max) if (self.show_mag and f_dn is not None) else mc.Normalize(vmin=0, vmax=v_max)
+                    sm = plt.cm.ScalarMappable(cmap=cmap_choice, norm=norm_choice)
+                    sm.set_array([])
+                    cb = self.fig.colorbar(sm, cax=cax)
                     exp = int(np.floor(np.log10(v_max)))
                     cb.ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos, e=exp: f"{x / (10**e):.1f}"))
                     cax.set_title(f"1e{exp}", fontsize=10)
@@ -762,7 +799,11 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
             if not self.show_dcmp_norm and len(processed_partitions) > 0:
                 cax = self.cax_list[0]
                 cax.clear()
-                cb = self.fig.colorbar(mesh, cax=cax)
+                cmap_choice = 'bwr' if (self.show_mag and f_dn is not None) else 'jet'
+                norm_choice = mc.Normalize(vmin=-global_vmax, vmax=global_vmax) if (self.show_mag and f_dn is not None) else mc.Normalize(vmin=0, vmax=global_vmax)
+                sm = plt.cm.ScalarMappable(cmap=cmap_choice, norm=norm_choice)
+                sm.set_array([])
+                cb = self.fig.colorbar(sm, cax=cax)
                 exp = int(np.floor(np.log10(global_vmax)))
                 cb.ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos, e=exp: f"{x / (10**e):.1f}"))
                 cax.set_title(f"1e{exp}", fontsize=10)
@@ -786,11 +827,18 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
         
         processed_partitions = []
         global_vmax = 0.0
+
+        if self.normalize and f_ldos_raw is not None:
+            total_ldos_map = np.sum(f_ldos_raw, axis=(2, 3))
+            s_idx = np.argsort(self.map_e_targets)
+            norm_denom_map = np.trapezoid(total_ldos_map[:, s_idx], x=self.map_e_targets[s_idx], axis=1)[:, None] + 1e-15
+        else:
+            norm_denom_map = 1.0
+
         for p_label, p_data in partitions:
             t_data = p_data.copy()
             if self.normalize:
-                s_idx = np.argsort(self.map_e_targets)
-                t_data /= (np.trapezoid(t_data[:, s_idx], x=self.map_e_targets[s_idx], axis=1)[:, None] + 1e-15)
+                t_data /= norm_denom_map
             t_data = np.nan_to_num(t_data, nan=0.0, posinf=0.0, neginf=0.0)
             processed_partitions.append((p_label, t_data))
             v_max = np.max(np.abs(t_data))
@@ -854,7 +902,9 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                 hit = any(l.contains(event)[0] for l in self.ax_spec.get_lines() if l.get_picker())
                 if not hit:
                     self.plot_level = max(0, self.plot_level - 1)
-                    self._update_all()
+                    
+        if self.fig.canvas.manager.toolbar.mode == "":
+            self._update_all()
 
     def _get_element_by_index_helper(self, a):
         curr = 0
