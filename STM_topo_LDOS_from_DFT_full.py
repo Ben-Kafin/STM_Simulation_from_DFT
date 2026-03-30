@@ -4,8 +4,6 @@ Interactive STM Simulator: Multi-Tiered GPU Optimization
 Developed by Benjamin Kafin
 """
 
-import os
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import cupy as cp  
@@ -121,8 +119,12 @@ class Unified_STM_Simulator:
             locpot_raw = cp.array(lpt_mgr.get_data(), dtype=cp.float32)
             
             if self.is_polarized:
-                v_total, v_diff = locpot_raw[0], locpot_raw[1]
-                self.locpot_gpu = cp.stack([v_total + 0.5 * v_diff, v_total - 0.5 * v_diff])
+                # LocpotManager stores [V_up, V_dn] where V_up=(V_tot+V_mag)/2, V_dn=(V_tot-V_mag)/2.
+                # The tunneling barrier is set by the TOTAL electrostatic potential,
+                # not a per-spin potential. V_total = V_up + V_dn.
+                # Spin physics enters through the DOS (already separated), not the barrier.
+                v_total = locpot_raw[0] + locpot_raw[1]
+                self.locpot_gpu = cp.stack([v_total, v_total])
             else:
                 self.locpot_gpu = locpot_raw
                 
@@ -197,7 +199,7 @@ class Unified_STM_Simulator:
                     kappa = 0.512 * cp.sqrt(cp.maximum(0.1, phi_local))
                     sf = cp.exp(-2.0 * kappa[None, :] * dists)
                     w_atom = cp.dot(self.map_mat_gpu, sf)
-                    output_ldos = w_atom.T[:, None, :, None] * dos_gpu[:, energy_indices, :][None, :, :, :]
+                    output_ldos = w_atom.T[:, None, :, None] * dos_gpu[:, energy_indices, :].transpose(1, 0, 2)[None, :, :, :]
             return output_ldos
 
         if self.is_polarized:
@@ -208,7 +210,7 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
     def __init__(self, filepath, erange, ldos_height, cmap_topo):
         super().__init__(filepath)
         self.parse_vasp_outputs("LOCPOT")
-        self.p1, self.p2 = np.array([0.0, 0.0]), self.lv[0, :2] + self.lv[1, :2]
+        self.p1, self.p2 = None, None
         self.erange, self.ldos_height, self.cmap_topo = list(erange), ldos_height, cmap_topo
         self.npts = 72; self.is_running, self.normalize, self.show_mag = False, False, False
         self.show_atoms, self.show_unit_cell = True, False
@@ -230,8 +232,19 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
         self.cached_ld_up, self.cached_ld_dn, self.cached_eg = None, None, None
         self.cached_marker_coords, self.cached_spec_ldos = None, None
 
-    def run_interactive(self, grid_res=64, topo_bias=0.2, topo_height=2.5, ldos_bias_sign='neg', use_decay_topo=True, use_decay_ldos=True):
+    def run_interactive(self, grid_res=64, topo_bias=0.2, topo_height=2.5, ldos_bias_sign='neg', use_decay_topo=True, use_decay_ldos=True, line_endpoints=None, marker_positions=None):
         self.ldos_bias_sign, self.use_decay_topo, self.use_decay_ldos = ldos_bias_sign, use_decay_topo, use_decay_ldos
+        if line_endpoints is not None:
+            self.p1, self.p2 = np.array(line_endpoints[0], dtype=float), np.array(line_endpoints[1], dtype=float)
+        elif self.p1 is None:
+            self.p1, self.p2 = np.array([0.0, 0.0]), self.lv[0, :2] + self.lv[1, :2]
+        if marker_positions is not None:
+            self.marker_coords = [list(pt) for pt in marker_positions]
+            v = self.p2 - self.p1; v_sq = np.dot(v, v)
+            if v_sq > 1e-9:
+                self.marker_ratios = [np.clip(np.dot(np.array(pt) - self.p1, v) / v_sq, 0, 1) for pt in marker_positions]
+            else:
+                self.marker_ratios = list(np.linspace(0.1, 0.9, len(marker_positions)))
         self.global_topo_bias = topo_bias
         self.topo_height = topo_height
         print("\n--- Phase 1: Global Topography Pre-Calculation ---")
@@ -322,10 +335,15 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
             self.s_num_marks.on_changed(self._on_ui_change)
 
         elif self.mode == 'Line':
-            self.gs = gridspec.GridSpec(3, 2, height_ratios=[2.5, 1, 0.25], hspace=0.35, wspace=0.25)
-            self.ax_map, self.ax_prof, self.ax_spec = self.fig.add_subplot(self.gs[0, 0]), self.fig.add_subplot(self.gs[1, 0]), self.fig.add_subplot(self.gs[1, 1])
-            lgs = gridspec.GridSpecFromSubplotSpec(1, 4, subplot_spec=self.gs[0, 1], width_ratios=[0.08, 2, 0.03, 0.05], wspace=0.0)
-            self.ax_stripe, self.ax_ldos, self.cax = self.fig.add_subplot(lgs[0]), self.fig.add_subplot(lgs[1]), self.fig.add_subplot(lgs[3])
+            self.gs = gridspec.GridSpec(3, 1, height_ratios=[1, 1, 0.15], hspace=0.35)
+            self.top_gs = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=self.gs[0, 0], width_ratios=[1, 2.5], wspace=0.25)
+            self.ax_map = self.fig.add_subplot(self.top_gs[0])
+            lgs = gridspec.GridSpecFromSubplotSpec(1, 6, subplot_spec=self.top_gs[1], width_ratios=[1, 0.06, 0.05, 1, 0.03, 0.05], wspace=0.0)
+            self.ax_line_topo = self.fig.add_subplot(lgs[0])
+            self.ax_stripe, self.ax_ldos, self.cax = self.fig.add_subplot(lgs[2]), self.fig.add_subplot(lgs[3]), self.fig.add_subplot(lgs[5])
+            bot_gs = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=self.gs[1, 0], width_ratios=[2.5, 1], wspace=0.25)
+            self.ax_prof = self.fig.add_subplot(bot_gs[0])
+            self.ax_spec = self.fig.add_subplot(bot_gs[1])
             self.line_art, = self.ax_map.plot([], [], 'r--', lw=2.5, zorder=5)
             self.ends = self.ax_map.scatter([], [], c='white', edgecolors='red', s=100, zorder=10, picker=5)
             self.marks = self.ax_map.scatter([], [], s=150, edgecolors='black', zorder=15, picker=5)
@@ -359,6 +377,18 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
         self.is_running = not self.is_running
         self.btn_run.label.set_text('STOP' if self.is_running else 'RUN')
         if self.is_running: self._update_all()
+        else:
+            if self.mode == 'Line' and self.p1 is not None and self.p2 is not None:
+                v = self.p2 - self.p1
+                m_pos = [self.p1 + r * v for r in self.marker_ratios]
+                print("\n--- Line Endpoints & Markers (copy-paste into run_interactive) ---")
+                print(f"line_endpoints=([{self.p1[0]:.6f}, {self.p1[1]:.6f}], [{self.p2[0]:.6f}, {self.p2[1]:.6f}]),")
+                pos_str = ", ".join(f"[{p[0]:.6f}, {p[1]:.6f}]" for p in m_pos)
+                print(f"marker_positions=[{pos_str}]")
+            elif self.mode in ['Single Point', 'Map']:
+                print("\n--- Marker Positions (copy-paste into run_interactive) ---")
+                pos_str = ", ".join(f"[{p[0]:.6f}, {p[1]:.6f}]" for p in self.marker_coords)
+                print(f"marker_positions=[{pos_str}]")
 
     def _update_all(self, full_refresh=False):
         if full_refresh:
@@ -613,6 +643,8 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
         
         p_dist_val = p_dist[active_idx] if self.mode == 'Line' else f"[{self.marker_coords[active_idx][0]:.1f}, {self.marker_coords[active_idx][1]:.1f}]"
         self.ax_spec.set(title=f"Partitioned LDOS (Marker {self.active_marker_idx}: {p_dist_val} Å)", xlabel="Energy (eV)")
+        if self.mode == 'Line':
+            self.ax_spec.set_box_aspect(1)
 
         if self.mode == 'Map':
             if not hasattr(self, 'map_e_targets') or len(self.map_e_targets) != nepts or full_refresh:
@@ -627,6 +659,7 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
             self.ax_prof.clear()
             if getattr(self, 'ax_ldos', None) and self.ax_ldos in self.fig.axes: self.ax_ldos.remove(); self.ax_ldos = None
             if getattr(self, 'ax_stripe', None) and self.ax_stripe in self.fig.axes: self.ax_stripe.remove(); self.ax_stripe = None
+            if getattr(self, 'ax_line_topo', None) and self.ax_line_topo in self.fig.axes: self.ax_line_topo.remove(); self.ax_line_topo = None
             if getattr(self, 'cax', None) and self.cax in self.fig.axes: self.cax.remove(); self.cax = None
             import matplotlib.ticker as ticker
             self.line_decomp_axes = []
@@ -650,12 +683,80 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
             
             num_p = max(1, len(partitions))
             if self.show_dcmp_norm:
-                w_ratios = [0.08 * num_p] + [2, 0.05 * num_p, 0.15 * num_p] * num_p
+                w_ratios = [1, 0.06, 0.05] + [1, 0.05, 0.1] * num_p
             else:
-                w_ratios = [0.08 * num_p] + [2, 0.0, 0.0] * (num_p - 1) + [2, 0.05 * num_p, 0.0]
-            lgs = gridspec.GridSpecFromSubplotSpec(1, 1 + num_p*3, subplot_spec=self.gs[0, 1], width_ratios=w_ratios, wspace=0.1)
+                w_ratios = [1, 0.06, 0.05] + [1, 0.0, 0.0] * (num_p - 1) + [1, 0.05, 0.0]
+            lgs = gridspec.GridSpecFromSubplotSpec(1, 3 + num_p*3, subplot_spec=self.top_gs[1], width_ratios=w_ratios, wspace=0.0)
             
-            self.ax_stripe = self.fig.add_subplot(lgs[0])
+            # --- Line Topo: rotated global topography centered on line path ---
+            self.ax_line_topo = self.fig.add_subplot(lgs[0])
+            self.line_decomp_axes.append(self.ax_line_topo)
+            
+            ax_spacer = self.fig.add_subplot(lgs[1])
+            ax_spacer.axis('off')
+            self.line_decomp_axes.append(ax_spacer)
+            
+            v_line = self.p2 - self.p1
+            v_hat = v_line / p_len
+            v_perp = np.array([-v_hat[1], v_hat[0]])
+            half_w = p_len / 2.0
+            
+            # Concatenate all tiled points for a single tricontourf (avoids cross-tile artifacts)
+            n_tile = max(int(self.s_cell.val), 1) + 1
+            margin = p_len * 0.15
+            all_rx, all_ry, all_z = [], [], []
+            for i in range(-n_tile, n_tile + 1):
+                for j in range(-n_tile, n_tile + 1):
+                    off = i * self.lv[0, :2] + j * self.lv[1, :2]
+                    pts = self.grid_xy + off
+                    dx = pts[:, 0] - self.p1[0]
+                    dy = pts[:, 1] - self.p1[1]
+                    rot_x = dx * v_perp[0] + dy * v_perp[1]
+                    rot_y = dx * v_hat[0] + dy * v_hat[1]
+                    mask = (rot_x > -half_w - margin) & (rot_x < half_w + margin) & (rot_y > -margin) & (rot_y < p_len + margin)
+                    all_rx.append(rot_x[mask])
+                    all_ry.append(rot_y[mask])
+                    all_z.append(self.global_z_map[mask])
+            all_rx = np.concatenate(all_rx)
+            all_ry = np.concatenate(all_ry)
+            all_z = np.concatenate(all_z)
+            self.ax_line_topo.tricontourf(all_rx, all_ry, all_z, levels=60, cmap=self.cmap_topo, zorder=1)
+            
+            if self.show_atoms:
+                tr = np.repeat(self.atomtypes, self.atomnums)
+                for t_idx, t_name in enumerate(self.atomtypes):
+                    m = (tr == t_name)
+                    a_rx_all, a_ry_all = [], []
+                    for i_tile in range(-n_tile, n_tile + 1):
+                        for j_tile in range(-n_tile, n_tile + 1):
+                            off = i_tile * self.lv[0, :2] + j_tile * self.lv[1, :2]
+                            a_dx = self.coord[m, 0] + off[0] - self.p1[0]
+                            a_dy = self.coord[m, 1] + off[1] - self.p1[1]
+                            a_rx = a_dx * v_perp[0] + a_dy * v_perp[1]
+                            a_ry = a_dx * v_hat[0] + a_dy * v_hat[1]
+                            vis = (a_rx > -half_w) & (a_rx < half_w) & (a_ry > 0) & (a_ry < p_len)
+                            a_rx_all.append(a_rx[vis])
+                            a_ry_all.append(a_ry[vis])
+                    if a_rx_all:
+                        self.ax_line_topo.scatter(np.concatenate(a_rx_all), np.concatenate(a_ry_all), s=10, color=plt.cm.tab10(t_idx/10), alpha=0.3, zorder=2)
+            
+            self.ax_line_topo.plot([0, 0], [0, p_len], color='red', ls='--', lw=2.0, zorder=6)
+            self.ax_line_topo.scatter([0], [0], c='white', edgecolors='red', s=60, zorder=8)
+            self.ax_line_topo.scatter([0], [p_len], c='white', edgecolors='red', s=60, zorder=8)
+            
+            for i, r in enumerate(self.marker_ratios):
+                color = self.m_colors[i % len(self.m_colors)]
+                self.ax_line_topo.scatter([0], [r * p_len], c=color, edgecolors='black', s=80, zorder=10)
+            
+            self.ax_line_topo.set_xlim(-half_w, half_w)
+            self.ax_line_topo.set_ylim(0, p_len)
+            self.ax_line_topo.set_box_aspect(1)
+            self.ax_line_topo.set_xlabel("Perp. (Å)", fontsize=10)
+            self.ax_line_topo.set_ylabel("Position (Å)", fontsize=10)
+            self.ax_line_topo.set_title("Topo", fontsize=10)
+            
+            # --- Topo stripe ---
+            self.ax_stripe = self.fig.add_subplot(lgs[2])
             self.line_decomp_axes.append(self.ax_stripe)
             
             lc = LineCollection(np.array([np.array([np.zeros_like(p_dist), p_dist]).T[:-1], np.array([np.zeros_like(p_dist), p_dist]).T[1:]]).transpose(1, 0, 2), cmap=self.cmap_topo, norm=plt.Normalize(self.current_z_line.min(), self.current_z_line.max()), linewidth=40)
@@ -664,8 +765,8 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
             self.ax_prof.plot(p_dist, self.current_z_line, 'k-', lw=1.5); self.ax_prof.set(ylabel="Height (Å)", title="Tip Height", xlabel="Dist (Å)")
             
             for p_idx, (p_label, t_data) in enumerate(processed_partitions):
-                ax_l = self.fig.add_subplot(lgs[1 + p_idx*3])
-                cax_l = self.fig.add_subplot(lgs[2 + p_idx*3])
+                ax_l = self.fig.add_subplot(lgs[3 + p_idx*3])
+                cax_l = self.fig.add_subplot(lgs[4 + p_idx*3])
                 self.line_decomp_axes.extend([ax_l, cax_l])
                 
                 v_max = np.max(np.abs(t_data)) if self.show_dcmp_norm else global_vmax
@@ -675,6 +776,9 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                     mesh = ax_l.pcolormesh(self.cached_eg, p_dist, t_data, cmap='bwr', shading='auto', vmin=-v_max, vmax=v_max)
                 else:
                     mesh = ax_l.pcolormesh(self.cached_eg, p_dist, t_data, cmap='jet', shading='auto', vmin=0, vmax=v_max)
+                
+                ax_l.set_box_aspect(1)
+                ax_l.set_anchor('W')
                 
                 if self.plot_level >= 3:
                     ax_l.set_title(p_label.split()[-1], fontsize=10)
@@ -689,6 +793,7 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                     cax_l.set_title(f"1e{exp}", fontsize=10)
                 else:
                     cax_l.axis('off')
+                cax_l.set_anchor('W')
                 
                 for i, r in enumerate(self.marker_ratios):
                     idx = int(r * (self.npts - 1)); color = self.m_colors[i % len(self.m_colors)]
@@ -697,7 +802,7 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
                     if p_idx == 0: self.ax_stripe.axhline(y=p_dist[idx], color=color, ls='--', lw=2, alpha=0.7, picker=5, label=f'marker_{i}')
 
             if self.plot_level >= 3:
-                ax_super = self.fig.add_subplot(self.gs[0, 1])
+                ax_super = self.fig.add_subplot(self.top_gs[1])
                 ax_super.axis('off')
                 ax_super.set_title(f"LDOS: {self.active_element}", fontsize=12, pad=20)
                 self.line_decomp_axes.append(ax_super)
@@ -930,7 +1035,7 @@ class Interactive_STM_Simulator(Unified_STM_Simulator):
         elif t_obj == 'mark_dynamic' and self.mode == 'Line':
             if hasattr(self, 'ax_prof') and event.inaxes == self.ax_prof:
                 if p_len > 1e-9: self.marker_ratios[idx] = np.clip(event.xdata / p_len, 0, 1)
-            elif hasattr(self, 'ax_ldos') and event.inaxes in [self.ax_ldos, self.ax_stripe]:
+            elif event.inaxes in [ax for ax in [getattr(self, 'ax_ldos', None), getattr(self, 'ax_stripe', None), getattr(self, 'ax_line_topo', None)] if ax is not None]:
                 if p_len > 1e-9: self.marker_ratios[idx] = np.clip(event.ydata / p_len, 0, 1)
         elif t_obj == 'emarker' and event.inaxes == self.ax_spec:
             self.map_e_targets[idx] = np.clip(event.xdata, self.s_emin.val, self.s_emax.val)
@@ -980,4 +1085,6 @@ if __name__ == "__main__":
     v_dir = r'C:/dir'
     # Initialized without hardcoded path or marker indices
     sim = Interactive_STM_Simulator(v_dir, [-2.525, -1.3], 1.3, LinearSegmentedColormap.from_list("t", ["black", "firebrick", "yellow"]))
-    sim.run_interactive(grid_res=64, topo_bias=0.2, topo_height=2.5, ldos_bias_sign='neg', use_decay_topo=True)
+    sim.run_interactive(grid_res=64, topo_bias=0.2, topo_height=2.5, ldos_bias_sign='neg', use_decay_topo=True,
+                        line_endpoints=([11.849932, -7.506780], [5.490312, 22.283022]),      # e.g. ([x1, y1], [x2, y2])
+                        marker_positions=[[8.697210, 7.261233], [7.080217, 14.835572]])     # e.g. [[x1, y1], [x2, y2]]
